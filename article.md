@@ -46,9 +46,7 @@ SkyPilot provisions the VM, runs the job, then shuts down the machine.
 
 If the GPU configuration isn't available in the selected region, simply remove the `region:` line and SkyPilot will search across all regions.
 
-Better yet, instead of specifying a select cloud provider, you can let SkyPilot choose one for you. It'll automatically look through the catalog of the 16+ providers it currently supports and choose the cheapest available option.
-
-
+Better yet, instead of specifying a cloud provider, you can let SkyPilot choose one for you. It'll automatically look through the catalog of the 16+ providers it currently supports and choose the cheapest available option.
 
 SkyPilot also supports managed job queues with spot instances (with automatic recovery from preemption), hyperparameter search across thousands of instances on multiple clouds, and reproducible cloud development environments. When it's time to deploy, it can serve your LLM and scale automatically across clouds and regions.
 
