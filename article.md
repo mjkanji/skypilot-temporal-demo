@@ -73,271 +73,108 @@ You can find the full code for the demo here.
 
 ### Explanation
 
-The `SkyPilotWorkflow` is broken down into six different activities. Let's go through them one by one:
+The demo code provides generic Temporal wrappers for the following SkyPilot commands:
+
+- `sky launch`: Provisions infrastructure and runs a task
+- `sky exec`: Runs a task on existing infrastructure
+- `sky down`: Terminates infrastructure
+
+These operations are wrapped in Temporal activities, making the entire workflow durable and resilient to failures.
+
+The `SkyPilotWorkflow` below orchestrates an end-to-end ML pipeline through six activities:
+
+1\. `run_git_clone` clones the `mock-train-workflow` repo from GitHub onto the worker, so it has access to the code that the SkyPilot job must execute.
 
 ```python
-@workflow.defn
-class SkyPilotWorkflow:
-
-    @workflow.run
-    async def run(self, input: SkyPilotWorkflowInput) -> str:
-        ...
-        # 1. Clone the repository and retrieve YAML contents
-        ...
-        clone_result = await workflow.execute_activity(
-            run_git_clone,
-            GitCloneInput(repo_url=repo_url,
-                          clone_path=clone_path,
-                          yaml_file_paths=yaml_paths,
-                          branch=branch,
-                          api_server_endpoint=api_server_endpoint),
-            start_to_close_timeout=timedelta(minutes=5),
-            retry_policy=retry_policy,
-            task_queue=WORKER_TASK_QUEUE,
-        )
+clone_result = await workflow.execute_activity(
+    run_git_clone,
+    GitCloneInput(repo_url=repo_url,
+                    clone_path=clone_path,
+                    yaml_file_paths=yaml_paths,
+                    branch=branch,
+                    api_server_endpoint=api_server_endpoint),
+    start_to_close_timeout=timedelta(minutes=5),
+    retry_policy=retry_policy,
+    task_queue=WORKER_TASK_QUEUE,
+)
 ```
 
-This activity clones the `mock-train-workflow` repo from GitHub onto the worker, so it has access to the code that the SkyPilot job must execute.
-
-The next step in our AI pipeline is preprocessing some data to prepare it for model training. Let's look at the definition of this task:
-
-```yaml
-# data_preprocessing.yaml
-resources:
-  cpus: 1+
-  cloud: aws
-
-envs:
-  DATA_BUCKET_NAME:
-  DATA_BUCKET_STORE_TYPE: s3
-
-file_mounts:
-  /data:
-    name: $DATA_BUCKET_NAME
-    store: $DATA_BUCKET_STORE_TYPE
-
-setup: |
-  echo "Setting up dependencies for data preprocessing..."
-
-run: |
-  echo "Running data preprocessing..."
-  
-  # Generate few files with random data to simulate data preprocessing
-  for i in {0..9}; do
-      dd if=/dev/urandom of=/data/file_$i bs=1M count=10
-  done
-  
-  echo "Data preprocessing completed, wrote to $DATA_BUCKET_NAME"
+2\. The second step uses the `run_sky_launch` activity to launch a SkyPilot cluster
+to execute the task defined in `data_preprocessing.yaml`.
+```python
+preprocess_result = await workflow.execute_activity(
+    run_sky_launch,
+    SkyLaunchCommand(cluster_name=cluster_name,
+                    yaml_content=preprocess_yaml,
+                    launch_kwargs=launch_kwargs,
+                    envs_override=input.envs_override,
+                    api_server_endpoint=api_server_endpoint),
+    start_to_close_timeout=timedelta(minutes=30),
+    retry_policy=retry_policy,
+    task_queue=WORKER_TASK_QUEUE,
+)
 ```
 
-This mock task simply writes random data to S3. In a production setting, this may involve normalizing your dataset, feature engineering, splitting the data into training and test sets, etc. 
-
-Next, we launch this task using the `run_sky_launch` activity. This takes the YAML config above as input and uses SkyPilot to launch a VM to execute this task.
+3\. Next, we use the `run_sky_down` activity to terminate the preprocessing cluster
+from the last step.
 
 ```python
-@workflow.defn
-class SkyPilotWorkflow:
-
-    @workflow.run
-    async def run(self, input: SkyPilotWorkflowInput) -> str:
-        ...
-        
-        # 2. Launch data preprocessing
-        preprocess_yaml = clone_result.yaml_contents["data_preprocessing.yaml"]
-        cluster_name = f"{cluster_prefix}-preprocess"
-
-        preprocess_result = await workflow.execute_activity(
-            run_sky_launch,
-            SkyLaunchCommand(cluster_name=cluster_name,
-                             yaml_content=preprocess_yaml,
-                             launch_kwargs=launch_kwargs,
-                             envs_override=input.envs_override,
-                             api_server_endpoint=api_server_endpoint),
-            start_to_close_timeout=timedelta(minutes=30),
-            retry_policy=retry_policy,
-            task_queue=WORKER_TASK_QUEUE,
-        )
+down_result = await workflow.execute_activity(
+    run_sky_down,
+    SkyDownCommand(cluster_name=cluster_name,
+                    api_server_endpoint=api_server_endpoint),
+    start_to_close_timeout=timedelta(minutes=10),
+    retry_policy=retry_policy,
+    task_queue=WORKER_TASK_QUEUE,
+)
 ```
 
-Let's examine the `run_sky_launch` activity in more detail:
+4. The fourth step uses the `run_sky_launch` activity to create a new cluster
+for the model training job, as defined in `train.yaml`.
 
 ```python
-@dataclass
-class SkyLaunchCommand:
-    """Command to launch a SkyPilot cluster with a task."""
-    cluster_name: str
-    yaml_content: str
-    launch_kwargs: Dict[str, Any] = None
-    envs_override: Dict[str, str] = None
-    api_server_endpoint: Optional[str] = None
-    
-@activity.defn
-async def run_sky_launch(input: SkyLaunchCommand) -> str:
-    ...
-    import sky
-
-    # Parse the YAML content into a task config
-    task_config = yaml.safe_load(input.yaml_content)
-    ...
-    # Create task from config
-    task = sky.Task.from_yaml_config(task_config)
-    ...
-    # Launch the task, passing kwargs directly to sky.launch
-    launch_request_id = sky.launch(task,
-                                   cluster_name=input.cluster_name,
-                                   **launch_kwargs)
-    # Run the blocking stream_and_get in a separate thread
-    job_id, status = await asyncio.to_thread(sky.stream_and_get,
-                                             launch_request_id)
-    ...
-    return f"Launched cluster {input.cluster_name} with job ID {job_id}. Status: {status}\n{log_output}"
+train_result = await workflow.execute_activity(
+    run_sky_launch,
+    SkyLaunchCommand(cluster_name=cluster_name,
+                    yaml_content=train_yaml,
+                    launch_kwargs=launch_kwargs,
+                    envs_override=input.envs_override,
+                    api_server_endpoint=api_server_endpoint),
+    start_to_close_timeout=timedelta(hours=1),
+    retry_policy=retry_policy,
+    task_queue=WORKER_TASK_QUEUE,
+)
 ```
 
-It's mostly just set up for the configuration SkyPilot needs to execute the job. The main item of note is the call to the `sky.launch` command to launch the job based on the YAML task definition. 
-
-Additionally, because the remote task may execute for a while, we use `asyncio.to_thread` to run the `sky.stream_and_get` call in a separate thread to avoid blocking the Temporal event loop.
-
-Once SkyPilot has launched and executed the task, it will keep the provisioned remote cluster running (unless you launch the cluster with auto-stop enabled). 
-
-To make sure we clean up any resources and shut down the cluster, the next step in the workflow calls the `run_sky_down` activity on the cluster:
+5\. Next, we evaluate the model. Because training and inference often have
+similar computational requirements, we re-use the training cluster through the
+`run_sky_exec` activity.
 
 ```python
-@workflow.defn
-class SkyPilotWorkflow:
-
-    @workflow.run
-    async def run(self, input: SkyPilotWorkflowInput) -> str:
-        ...
-        
-        # 3. Down the cluster
-        down_result = await workflow.execute_activity(
-            run_sky_down,
-            SkyDownCommand(cluster_name=cluster_name,
-                           api_server_endpoint=api_server_endpoint),
-            start_to_close_timeout=timedelta(minutes=10),
-            retry_policy=retry_policy,
-            task_queue=WORKER_TASK_QUEUE,
-        )
+eval_result = await workflow.execute_activity(
+    run_sky_exec,
+    SkyExecCommand(cluster_name=cluster_name,
+                    yaml_content=eval_yaml,
+                    exec_kwargs=exec_kwargs,
+                    envs_override=input.envs_override,
+                    api_server_endpoint=api_server_endpoint),
+    start_to_close_timeout=timedelta(minutes=30),
+    retry_policy=retry_policy,
+    task_queue=WORKER_TASK_QUEUE,
+)
 ```
 
-This activity uses the SkyPilot Python API to instruct the API server to tear down the cluster:
+6. Finally, we tear down the training cluster at the end of the workflow.
 
 ```python
-@dataclass
-class SkyDownCommand:
-    """Command to terminate a SkyPilot cluster."""
-    cluster_name: str
-    api_server_endpoint: Optional[str] = None
-    
-@activity.defn
-async def run_sky_down(input: SkyDownCommand) -> str:
-    ...
-    import sky
-
-    down_request_id = sky.down(cluster_name=input.cluster_name)
-    await asyncio.to_thread(sky.stream_and_get, down_request_id)
-	...
-```
-
-We have now successfully preprocessed our data, and it's ready for training. We can reuse the same `run_sky_launch` activity to launch the training job by replacing the `yaml_content` argument with the config for the training job.
-
-```python
-@workflow.defn
-class SkyPilotWorkflow:
-
-    @workflow.run
-    async def run(self, input: SkyPilotWorkflowInput) -> str:
-        ...
-        
-        # 4. Launch training
-        train_yaml = clone_result.yaml_contents["train.yaml"]
-        train_result = await workflow.execute_activity(
-            run_sky_launch,
-            SkyLaunchCommand(...
-                             yaml_content=train_yaml, # This is the only change
-                             ...),
-            ...
-        )
-```
-
-Next, we evaluate the trained model. Since training and inference often have similar computational requirements, we re-use the cluster that we provisioned for training through the `run_sky_exec` activity:
-
-```python
-@workflow.defn
-class SkyPilotWorkflow:
-
-    @workflow.run
-    async def run(self, input: SkyPilotWorkflowInput) -> str:
-        ...
-        
-        # 5. Execute evaluation on the same cluster
-        eval_yaml = clone_result.yaml_contents["eval.yaml"]
-
-        eval_result = await workflow.execute_activity(
-            run_sky_exec,
-            SkyExecCommand(cluster_name=cluster_name, # Re-use the training cluster
-                           yaml_content=eval_yaml,    # Use the evaluation task definition 
-                           ...),
-            ...
-        )
-```
-
-The `run_sky_exec` activity is very similar to the `run_sky_launch` activity from earlier, with the only difference being that it executes a command on an already-running cluster, while `run_sky_launch` provisions the cluster first.
-
-```python
-@dataclass
-class SkyExecCommand:
-    """Command to execute a task on an existing SkyPilot cluster."""
-    cluster_name: str
-    yaml_content: str
-    exec_kwargs: Dict[str, Any] = None
-    envs_override: Dict[str, str] = None
-    api_server_endpoint: Optional[str] = None
-
-@activity.defn
-async def run_sky_exec(input: SkyExecCommand) -> str:
-    ...
-    import sky
-
-    # Parse the YAML content into a task config
-    task_config = yaml.safe_load(input.yaml_content)
-    ...
-    
-    # Create task from config
-    task = sky.Task.from_yaml_config(task_config)
-    ...
-
-    # Execute the task on the existing cluster, passing kwargs directly to sky.exec
-    exec_request_id = sky.exec(task,
-                               cluster_name=input.cluster_name,
-                               **exec_kwargs)
-
-    # Run the blocking stream_and_get in a separate thread
-    job_id, handle = await asyncio.to_thread(sky.stream_and_get,
-                                             exec_request_id)
-    ...
-    return f"Executed task on cluster {input.cluster_name} with job ID {job_id}.\n{log_output}"
-```
-
-Finally, before completing the workflow, we shut down the training cluster:
-
-```python
-@workflow.defn
-class SkyPilotWorkflow:
-
-    @workflow.run
-    async def run(self, input: SkyPilotWorkflowInput) -> str:
-        ...
-        
-        # 6. Down the cluster
-        down_result = await workflow.execute_activity(
-            run_sky_down,
-            SkyDownCommand(cluster_name=cluster_name,
-                           api_server_endpoint=api_server_endpoint),
-            start_to_close_timeout=timedelta(minutes=10),
-            retry_policy=retry_policy,
-            task_queue=WORKER_TASK_QUEUE,
-        )
+down_result = await workflow.execute_activity(
+    run_sky_down,
+    SkyDownCommand(cluster_name=cluster_name,
+                    api_server_endpoint=api_server_endpoint),
+    start_to_close_timeout=timedelta(minutes=10),
+    retry_policy=retry_policy,
+    task_queue=WORKER_TASK_QUEUE,
+)
 ```
 
 ### Demo
