@@ -124,6 +124,7 @@ clone_result = await workflow.execute_activity(
 
 2\. The second step uses the `run_sky_launch` activity to launch a SkyPilot cluster
 to execute the task defined in `data_preprocessing.yaml`.
+
 ```python
 preprocess_result = await workflow.execute_activity(
     run_sky_launch,
@@ -138,8 +139,8 @@ preprocess_result = await workflow.execute_activity(
 )
 ```
 
-3\. Next, we use the `run_sky_down` activity to terminate the preprocessing cluster
-from the last step.
+3\. Next, we use the `run_sky_down` activity to clean up resources and terminate
+the preprocessing cluster from the last step.
 
 ```python
 down_result = await workflow.execute_activity(
@@ -152,7 +153,7 @@ down_result = await workflow.execute_activity(
 )
 ```
 
-4. The fourth step uses the `run_sky_launch` activity to create a new cluster
+4\. The fourth step uses the `run_sky_launch` activity to create a new cluster
 for the model training job, as defined in `train.yaml`.
 
 ```python
@@ -257,3 +258,5 @@ without needing to learn about how Temporal works. And when it's time to deploy 
 they can bring over their SkyPilot task specifications to Temporal by reusing a generic set of Temporal Activities 
 (like the ones we used in this example) to run any SkyPilot task, minimizing any overhead for the platform engineering 
 team during deployment.
+
+[TODO: Add CTAs for Temporal and SkyPilot]
